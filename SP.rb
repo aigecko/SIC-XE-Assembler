@@ -36,10 +36,12 @@ initRegExps=->(){
         :Argument=> /,?([@#='\w]*)\s*(.*)/, #get a argument
         :XRegUsed=> /\s*,\s*X\s*(.*)/, #detect "X" and get comment
         :LastPart=> /\s*(.*)/, #get last part comment        
-        :Indirect=> /(@[\w_]*)/, #detect and get whether indirect adressing
+        :Indirect=> /(@[\w_]*)/, #detect and get whether indirect addressing
         :Immediate=> /#[\w_]*/, #detect and get whether immediate addressing        
         :LiteralString=> /=C'(\w*)'/, #get string part of a literal
-        :LiteralHex=> /=X'[A-Fa-f0-9]*'/ #get hex digit part of a literal
+        :LiteralHex=> /=X'[A-Fa-f0-9]*'/, #get hex digit part of a literal
+		:CharString=> /[C|c]'(?<string>\w*)'/, #get character string part
+		:HexString=> /[X|x]'(?<string>[\dA-Fa-f]*)'/ #get hex-digit string part
     }	
 	RegExps[:Middle]=Regexp.new(
 		'^(\s*(?<Line>\d*))?'+ #line number part
@@ -126,13 +128,17 @@ initProcs=->(){
         when -3
             "Over 6 character of Program's Name"
         when -4
-            "Define a Mnemonic or Dirctive as a Label is illegal"
+            "Define a Mnemonic or Directive as a Label is illegal"
         when -5
             "Unknown StartPoint after 'END'"
 		when -6
-		
+			"Multiple definition of Label"
 		when -7
-			"Operator unfound"
+			"Operator not found"
+		when -8
+			"Format1/2 can't use '+'"
+		when -9
+			"Unknown string format behind 'BYTE'"
         else
             "Runtime Error"
         end
@@ -154,8 +160,6 @@ initProcs=->(){
 		ExitAction.call
     }
 	
-	ProcMnemonic=->(){}
-	ProcDirective=->(){}
 	ProcDefineSymbol=->(){}
 	ProcProgramBlock=->(){}
 	ProcContralSection=->(){}
@@ -180,93 +184,52 @@ initProcs=->(){
 		return FinalOutput.call(pack)
 	}
 	
-    SetMidLine=->(pack){
+    ProcMnemonic=->(pack){
+		#detect format4
+		if(pack[:Operator]=='+')			
+			if(FormatTable[pack[:Operator][1..-1].to_sym]<=2)
+				ErrorAction.call(pack[:Line],-8)
+			end
+			pack[:Format]=4
+		else		
+			pack[:Format]=FormatTable[pack[:Operator].to_sym]
+		end
+		currentSection[:LocCtr]+=pack[:Format]
+		return ProcMiddle
+	}
+	ProcDirective=->(pack){
+		length=
+		case pack[:Operator].to_sym
+		when :RESB then pack[:Operand].to_i
+		when :RESW then pack[:Operand].to_i*3
+		when :WORD then 3
+		when :BYTE
+			case pack[:Operand]
+			#start with 'C' or 'c'
+			when RegExps[:CharString]
+				pack[:String]=$1
+				pack[:String].size
+			#star with 'X' or 'x'
+			when RegExps[:HexString]
+				pack[:String]=$1
+				if(pack[:String].size%2==1)
+					pack[:String]='0'+pack[:String]
+				end
+				#2 digit to 1 byte
+				pack[:String].size/2
+			else
+				ErrorAction(pack[:Line],-9)
+			end			
+		else 0
+		end
+		return ProcMiddle
+	}
+		
+	SetMidLine=->(pack){
         textRecord<< 'T'
         return GetMidLine
     }
-    GetMidLine=->(pack){
-        line=STDIN.gets
-        # if END appeared
-        if(line=~RegExps[:End])            
-            # set line number
-            ($1=="") or Line[pack[:Line]]=$1
-            # set start point
-            pack[:StartPoint]=($2!="")? $2.to_sym : nil
-            return GetLastLine.call(pack)
-        end
-		
-        #ignore comment
-        (line.match()) and return GetMidLine
-        #convert line number into inner format
-        line=line.match(RegExps[:Line])[2]
-        Line[line]= (($1=='')? nil : $1)
-        #get the first token
-        line.match(RegExps[:FirstToken])
-    
-        mnemonic=directive=label=comment=other=nil        
-        #make match pattern familiar
-        plusCharacter=$1
-        firstToken=$2.to_sym
-        other=$3
-                
-        #detect format 4
-        useFormat4= (plusCharacter=='+') ? true: false
-        #get tokens
-        if(MnemonicList.keys.include?(firstToken))
-            #opcode
-            mnemonic=firstToken
-        elsif(Directives.include?(firstToken))
-            #directives
-            directive=firstToken
-        else
-            #label            
-            label=firstToken
-            SymbolTable[label]=proLocCtr
-            #make match pattern familiar
-            other.match(RegExps[:FirstToken])
-            firstToken=$2.to_sym
-            other=$3
-            #get next token
-            if(MnemonicList.keys.include?(firstToken))
-                #opcode after label
-                mnemonic=firstToken
-            elsif(Directives.include?(firstToken))
-                #directives after label
-                directive=firstToken
-            else
-                #ERROR!                                
-                ErrorAction.call(fileLineCount,-2)
-            end
-        end
-        
-        #get arguments
-        argList=[]
-        ArgNum[mnemonic||directive].times{
-            other.match(RegExps[:Argument])
-            argList<<$1
-            other=$2
-        }
-        xRegUsed=false
-        if other.match(RegExps[:XRegUsed])
-            comment=$1
-            xRegUsed=true
-        else
-            comment=other.match(RegExps[:LastPart])[0]
-        end
-        
-        #create package
-        pack={
-            Label: label,
-            Format: (mnemonic and (useFormat4)?4:(FormatTable[mnemonic])),
-            Mnemonic: mnemonic,
-            Directive: directive,
-            ArgList: argList,
-            XRegUsed: xRegUsed#,
-            #Line: fileLineCount
-        }
-        return SetMidLine.call(pack)
-    }    
-	ProcMiddle=->(pack){
+    ProcMiddle=->(pack){
 		line=STDIN.gets
         #if END appeared
         if(line=~RegExps[:End])            
@@ -281,20 +244,37 @@ initProcs=->(){
 			return ProcMiddle
 		end
 		
-		if(result=line.match(RegExps[:Middle]))			
-			pack[:Line]=result[:Line]
+		#normal operator		
+		if(result=line.match(RegExps[:Middle]))
+			#set line number
+			Line[pack[:Line]]=result[:Line]			
 			pack[:Label]=result[:Label]
-			pack[:Operator]=result[:Operator]
+			#if label appear twice
+			if(currentSection[:SymbolTable].include? pack[:Label])
+				ErrorAction(pack[:Line],-6)
+			end
+			#detect whether 'X' appear
 			if(result[:Operand]) 
-				pack[:Operand]=result[:Operand].split(/[\s,]*/)
+				pack[:Operand]=result[:Operand].split(/[\s,]+/)
+				if(pack[:Operand].last=='X')
+					pack[:XRegUsed]=true
+				end
+				if(pack[:Operand].size==1)
+					pack[:Operand]=pack[:Operand][0]
+				end
 			else
 				pack[:Operand]=[]
 			end
-		else
-			puts line
-			ErrorAction.call(pack[:Line],-7)
+			pack[:Operator]=result[:Operator]
+			#distinct directive and mnemonic
+			if(Directives.include?(result[:Operator].to_sym))
+				return ProcDirective.call(pack)
+			else
+				return ProcMnemonic.call(pack)
+			end
 		end
-		return ProcMiddle		
+		#no operator found
+		ErrorAction.call(pack[:Line],-7)
 	}	
 	
 	SetFirstLine=->(pack){
@@ -348,12 +328,10 @@ init=->(){
 main=->(){
     fileLineCount=1
     #proccess first line
-    pack={Line: fileLineCount}
-    action=ProcFirstLine.call(pack)
+    action=ProcFirstLine
     while(true)
         pack={Line: fileLineCount}
-        action=action.call(pack)
-        
+        action=action.call(pack)        
         #move to next line
         fileLineCount+=1		
     end
