@@ -35,20 +35,21 @@ initRegExps=->(){
         :FirstToken=> /\d*\t*(\+?)([\w]*)\s*(.*)/, #get the first word
         :Argument=> /,?([@#='\w]*)\s*(.*)/, #get a argument
         :XRegUsed=> /\s*,\s*X\s*(.*)/, #detect "X" and get comment
-        :LastPart=> /\s*(.*)/, #get last part comment        
+        :LastPart=> /\s*(.*)/, #get last part comment
         :Indirect=> /(@[\w_]*)/, #detect and get whether indirect addressing
-        :Immediate=> /#[\w_]*/, #detect and get whether immediate addressing        
+        :Immediate=> /#[\w_]*/, #detect and get whether immediate addressing
         :LiteralString=> /=C'(\w*)'/, #get string part of a literal
         :LiteralHex=> /=X'[A-Fa-f0-9]*'/, #get hex digit part of a literal
 		:CharString=> /[C|c]'(?<string>\w*)'/, #get character string part
 		:HexString=> /[X|x]'(?<string>[\dA-Fa-f]*)'/ #get hex-digit string part
-    }	
+    }
+	list=(MnemonicList.keys+Directives).sort_by{|s| -s.length}.join('|')
 	RegExps[:Middle]=Regexp.new(
 		'^(\s*(?<Line>\d*))?'+ #line number part
 		'\s*((?<Label>\w+)\s+)?'+ #label part
 		'(?<Operator>\+?'+ #operator
-		"(#{(MnemonicList.keys+Directives).sort{|s| -s.length}.join('|')}))"+ #operator part
-		'(\s+(?<Operand>(\S+(\s*,\s*\S+)?)))?'+ #operand part		
+		"(#{list}))"+ #operator part
+		'\s+((?<Operand>(\S+(\s*,\s*\S+)?)))?'+ #operand part
 		'.*$', #comment part
 		Regexp::IGNORECASE)
 }
@@ -76,7 +77,7 @@ initFormatTable=->(){
     [:ADDR,:CLEAR,:COMPR,:DIVR,:MULR,:RMO,
      :SHIFTL,:SHIFTR,:SUBR,:SVC,:TIXR].each do |op|
         FormatTable[op]=2
-    end    
+    end
 }
 initRegisterTable=->(){
     RegTable={
@@ -97,12 +98,12 @@ CreateSection=->(pack){
 		StartLoc: pack[:StartAddress],
 		LocCtr: pack[:StartAddress],
 		BaseCtr: nil,
-		
+
 		HeaderRecord: String.new(),
 		TextRecord: String.new(),
-		TextArray: Array.new(),
+		TextArray: Hash.new(),
 		EndRecord: String.new(),
-		
+
 		SymbolTable: Hash.new()
 	}
 }
@@ -110,7 +111,7 @@ CreateSection=->(pack){
 initProcs=->(){
 	WarningAction=->(fileLineCount,wrnno){
 		STDERR.print("Warning: ")
-		STDERR.puts(		
+		STDERR.puts(
 		case wrnno
 		when -1
 			"Program Name was set to 'NONAME' because of no specified name"
@@ -120,7 +121,7 @@ initProcs=->(){
 	}
     ErrorAction=->(fileLineCount,errno){
         STDERR.puts(
-        case errno 
+        case errno
         when -1
             "Not a Mnemonic or Directive after LABLE"
         when -2
@@ -143,8 +144,11 @@ initProcs=->(){
             "Runtime Error"
         end
         )
+		for sym,val in currentSection[:SymbolTable]
+			puts "%s: %X"%[sym,val]
+		end
         STDERR.puts(
-		if(Line[fileLineCount])
+		if(Line[fileLineCount]&&Line[fileLineCount]!="")
 			"At line code-mode: #{Line[fileLineCount]}"
 		else
 			"At line text-mode: #{fileLineCount}"
@@ -154,21 +158,36 @@ initProcs=->(){
     }
     ExitAction=->(){ exit(0) }
     FinalOutput=->(pack){
-        print headerRecord
-        print textRecord
-        print endRecord
+		for sym,val in currentSection[:SymbolTable]
+			puts "%s: %X"%[sym,val]
+		end
+		for name,section in Sections
+			puts section[:HeaderRecord]
+			for code in section[:TextArray].values
+				if(code.class==String)
+					puts code
+				else
+					puts "%X"%code
+				end
+			end
+			puts section[:TextRecord]
+			puts section[:EndRecord]
+		end
 		ExitAction.call
     }
-	
+
 	ProcDefineSymbol=->(){}
-	ProcProgramBlock=->(){}
+	ProcProgramBlock=->(pack){
+
+	}
 	ProcContralSection=->(){}
-	
+
 	SetLastLine=->(pack){
-		#headerRecord<< "%06d" % (proLocCtr-startLoc)
-		
-        #endRecord<< 'E'
-		#endRecord<< "%06d"%startLoc
+		currentSection[:HeaderRecord]<< "%06X" % (
+			currentSection[:LocCtr]-currentSection[:StartLoc])
+
+		currentSection[:EndRecord]<< 'E'
+		currentSection[:EndRecord]<< "%06X"%currentSection[:StartLoc]
     }
 	GetLastLine=->(pack){
         if pack[:StartPoint]
@@ -177,22 +196,61 @@ initProcs=->(){
                 ErrorAction.call(pack[:Line],-5)
             end
         end
-    }	
+    }
 	ProcLastLine=->(pack){
 		GetLastLine.call(pack)
 		SetLastLine.call(pack)
 		return FinalOutput.call(pack)
 	}
-	
+
     ProcMnemonic=->(pack){
 		#detect format4
-		if(pack[:Operator]=='+')			
+		if(pack[:Operator][0]=='+')
+			#find mnemonic
 			if(FormatTable[pack[:Operator][1..-1].to_sym]<=2)
 				ErrorAction.call(pack[:Line],-8)
 			end
 			pack[:Format]=4
-		else		
+		else
 			pack[:Format]=FormatTable[pack[:Operator].to_sym]
+		end
+		#change to inter format
+		pack[:Operator]=pack[:Operator].to_sym
+		#generate binary code
+		if(pack[:Operand].size==0)
+			#no operand , direct output binary
+			currentSection[:TextArray][currentSection[:LocCtr]]=
+				MnemonicList[pack[:Operator]]
+		elsif(pack[:Operand].size==2)
+			#with 2 register operands
+			currentSection[:TextArray][currentSection[:LocCtr]]=
+				MnemonicList[pack[:Operator]]<<((pack[:Format]-1)*8)
+			#whether the 2nd operand is a number
+			currentSection[:TextArray][currentSection[:LocCtr]]+=
+			if(pack[:Operator]==:SHIFTL||
+			   pack[:Operator]==:SHIFTR)
+				pack[:Operand][1].to_i-1
+			else
+				RegTable[pack[:Operand][1].to_sym]
+			end
+			currentSection[:TextArray][currentSection[:LocCtr]]+=
+				RegTable[pack[:Operand][0].to_sym]<<4
+		else
+			#normal case with 1 operand
+			#detect special type operator
+			if(pack[:Format]==2)
+				currentSection[:TextArray][currentSection[:LocCtr]]=
+					MnemonicList[pack[:Operator]]<<8
+				currentSection[:TextArray][currentSection[:LocCtr]]+=
+				case pack[:Operator]
+				when :CLEAR,:TIXR
+					RegTable[pack[:Operand][0].to_sym]<<4
+				when :SVC
+					pack[:Operand][0].to_i
+				end
+			else
+				#TODO
+			end
 		end
 		currentSection[:LocCtr]+=pack[:Format]
 		return ProcMiddle
@@ -200,14 +258,21 @@ initProcs=->(){
 	ProcDirective=->(pack){
 		length=
 		case pack[:Operator].to_sym
-		when :RESB then pack[:Operand].to_i
-		when :RESW then pack[:Operand].to_i*3
+		when :RESB then pack[:Operand][0].to_i
+		when :RESW then pack[:Operand][0].to_i*3
 		when :WORD then 3
 		when :BYTE
-			case pack[:Operand]
+			case pack[:Operand][0]
 			#start with 'C' or 'c'
 			when RegExps[:CharString]
 				pack[:String]=$1
+				currentSection[:TextArray][currentSection[:LocCtr]]=0
+				#change ASCII to binary code
+				for char in pack[:String].chars
+					currentSection[:TextArray][currentSection[:LocCtr]]<<=8
+					currentSection[:TextArray][currentSection[:LocCtr]]+=
+					char.ord
+				end
 				pack[:String].size
 			#star with 'X' or 'x'
 			when RegExps[:HexString]
@@ -215,16 +280,18 @@ initProcs=->(){
 				if(pack[:String].size%2==1)
 					pack[:String]='0'+pack[:String]
 				end
-				#2 digit to 1 byte
+				#2 digit to 1 byte				
+				currentSection[:TextArray][currentSection[:LocCtr]]=pack[:String]
 				pack[:String].size/2
 			else
-				ErrorAction(pack[:Line],-9)
-			end			
+				ErrorAction.call(pack[:Line],-9)
+			end
 		else 0
 		end
+		currentSection[:LocCtr]+=length
 		return ProcMiddle
 	}
-		
+
 	SetMidLine=->(pack){
         textRecord<< 'T'
         return GetMidLine
@@ -232,35 +299,36 @@ initProcs=->(){
     ProcMiddle=->(pack){
 		line=STDIN.gets
         #if END appeared
-        if(line=~RegExps[:End])            
+        if(line=~RegExps[:End])
             #set line number
             ($1=="") or Line[pack[:Line]]=$1
             #set start point
-            pack[:StartPoint]=($2!="")? $2.to_sym : nil
+            pack[:StartPoint]=$2
             return ProcLastLine.call(pack)
         end
 		#ignore comment
 		if(line=~RegExps[:Comment])
 			return ProcMiddle
 		end
-		
-		#normal operator		
+
+		#normal operator
 		if(result=line.match(RegExps[:Middle]))
 			#set line number
-			Line[pack[:Line]]=result[:Line]			
+			Line[pack[:Line]]=result[:Line]
 			pack[:Label]=result[:Label]
 			#if label appear twice
-			if(currentSection[:SymbolTable].include? pack[:Label])
-				ErrorAction(pack[:Line],-6)
+			if(currentSection[:SymbolTable].keys.include? pack[:Label])
+				ErrorAction.call(pack[:Line],-6)
+			end
+			if(pack[:Label])
+				currentSection[:SymbolTable][pack[:Label]]=currentSection[:LocCtr]
 			end
 			#detect whether 'X' appear
-			if(result[:Operand]) 
+			if(result[:Operand])
 				pack[:Operand]=result[:Operand].split(/[\s,]+/)
-				if(pack[:Operand].last=='X')
+				if(pack[:Operand].last=='X'&&pack[:Operand].size>1)
+					pack[:Operand].delete('X')
 					pack[:XRegUsed]=true
-				end
-				if(pack[:Operand].size==1)
-					pack[:Operand]=pack[:Operand][0]
 				end
 			else
 				pack[:Operand]=[]
@@ -275,15 +343,15 @@ initProcs=->(){
 		end
 		#no operator found
 		ErrorAction.call(pack[:Line],-7)
-	}	
-	
+	}
+
 	SetFirstLine=->(pack){
         currentSection[:HeaderRecord]<< 'H'
         currentSection[:HeaderRecord]<< '%s'%pack[:Name]
 		for i in 0...6-pack[:Name].size
 			currentSection[:HeaderRecord]<< ' '
 		end
-        currentSection[:HeaderRecord]<< '%06d'%pack[:StartAddress]
+        currentSection[:HeaderRecord]<< '%06X'%pack[:StartAddress]
     }
 	GetFirstLine=->(pack){
         line=STDIN.gets
@@ -303,8 +371,8 @@ initProcs=->(){
 			pack[:Name]='NONAME'
         end
         #set start adderess
-        pack[:StartAddress]=$3.to_i
-		
+        pack[:StartAddress]=$3.to_i(16)
+
 		#create first section
 		currentName=pack[:Name]
 		currentSection=(Sections[currentName]=CreateSection.call(pack))
@@ -317,23 +385,23 @@ initProcs=->(){
 }
 init=->(){
     initMnemonicList.call()
-    initDirectives.call()    
+    initDirectives.call()
     initRegExps.call()
     initArgNumTable.call()
     initFormatTable.call()
     initRegisterTable.call()
     initProcs.call()
     initLineConvTable.call()
-} 
+}
 main=->(){
     fileLineCount=1
     #proccess first line
     action=ProcFirstLine
     while(true)
         pack={Line: fileLineCount}
-        action=action.call(pack)        
+        action=action.call(pack)
         #move to next line
-        fileLineCount+=1		
+        fileLineCount+=1
     end
 }
 init.call()
