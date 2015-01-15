@@ -14,3 +14,5 @@ Program Blocks<br>
 Contral Sections<br>
 Literal<br>
 Symbol Definition<br>
+# Execute
+command type "ruby SP.rb &nbgt; SP.txt"
