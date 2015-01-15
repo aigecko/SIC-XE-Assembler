@@ -167,7 +167,7 @@ initProcs=->(){
 		end
 		
 		for name,section in Sections
-			puts section[:HeaderRecord]
+			puts section[:HeaderRecord]			
 			for loc,code in section[:TextArray]
 				print 'T'
 				print "%06X%02X"%[loc,code.to_s.size/2]
