@@ -88,6 +88,11 @@ initRegisterTable=->(){
 initLineConvTable=->(){
     Line={}
 }
+initOffsetTable=->(){
+	OffsetTable={
+		N:17,I:16,X:15,B:14,P:13,E:12
+	}
+}
 
 Sections={}
 currentName=nil
@@ -144,9 +149,9 @@ initProcs=->(){
             "Runtime Error"
         end
         )
-		for sym,val in currentSection[:SymbolTable]		
-			puts "%s: %X"%[sym,val]
-		end
+		# for sym,val in currentSection[:SymbolTable]		
+			# puts "%s: %X"%[sym,val]
+		# end
         STDERR.puts(
 		if(Line[fileLineCount]&&Line[fileLineCount]!="")
 			"At line code-mode: #{Line[fileLineCount]}"
@@ -161,18 +166,20 @@ initProcs=->(){
 		require 'pp'
 		pp currentSection[:SymbolTable]
 		for sym,val in currentSection[:SymbolTable].sort_by{|s,v| v}
-			puts "%s: %X"%[sym,val]
+			puts "%s: 0x%04X"%[sym,val]
 		end
+		
 		for name,section in Sections
 			puts section[:HeaderRecord]
-			for code in section[:TextArray].values
+			for loc,code in section[:TextArray]
+				print 'T'
+				print "%06X %02X "%[loc,code.to_s.size/2]
 				if(code.class==String)
 					puts code
 				else
 					puts "%X"%code
 				end
 			end
-			puts section[:TextRecord]
 			puts section[:EndRecord]
 		end
 		ExitAction.call
@@ -227,34 +234,72 @@ initProcs=->(){
 		symbolTable=currentSection[:SymbolTable]
 		textArray=currentSection[:TextArray]
 		locCtr=currentSection[:LocCtr]
-		if(!symbolTable.keys.include?(target))
+		if(target=~/\d+/)
+			target=target.to_i
+		end
+		if(!symbolTable.keys.include?(target)&&target.class!=Fixnum)
 			#forward reference first appear
 			symbolTable[target]=[]
 			symbolTable[target]<<[locCtr,pack]
-		elsif(symbolTable[target].class!=Fixnum)
+		elsif(symbolTable[target].class!=Fixnum&&target.class!=Fixnum)
 			#forward reference
 			symbolTable[target]<<[locCtr,pack]
 		else
 			#backward reference
 			if(pack[:Format]==4)
 				#Format 4 use immediate addressing
-				textArray[locCtr]>>8
-				textArray[locCtr]|=currentSection[:SymbolTable[target]]
+				textArray[locCtr]>>=8				
 				#immediate tag
-				textArray[locCtr]|=1<<20
-				textArray[locCtr]<<8
+				textArray[locCtr]|=1<<OffsetTable[:I]
+				#extend tag
+				textArray[locCtr]|=1<<OffsetTable[:E]
+				if(pack[:Mode]!=:IMMEDIATE)
+					textArray[locCtr]|=1<<OffsetTable[:N]
+				end
+				textArray[locCtr]<<=8
+				if(target.class==Fixnum)
+					textArray[locCtr]|=target
+				else
+					textArray[locCtr]|=currentSection[:SymbolTable[target]]
+				end
 			else
 				#x register tag
 				if(pack[:XRegUsed])
-					textArray[locCtr]|=1<<19
+					textArray[locCtr]|=1<<OffsetTable[:X]
 				end
 				case pack[:Mode]
 				when :IMMEDIATE
-					textArray[locCtr]|=1<<20
-				when :INDIRECT				
-					textArray[locCtr]|=1<<21
-				end								
-				offset=currentSection[:SymbolTable][target]-currentSection[:LocCtr]				
+					textArray[locCtr]|=1<<OffsetTable[:I]
+					if(target.class==Fixnum)
+						textArray[locCtr]|=target
+					else
+						textArray[locCtr]|=symbolTable[target]
+					end
+				when :INDIRECT
+					textArray[locCtr]|=1<<OffsetTable[:N]
+					if(target.class==Fixnum)
+						textArray[locCtr]|=target
+					else
+						textArray[locCtr]|=symbolTable[target]
+					end
+				else
+					#detect PC relative				
+					offset=symbolTable[target]-currentSection[:LocCtr]
+					if(offset>=0&&offset<=2050)
+						textArray[locCtr]|=offset-3
+					elsif(offset<0&&offset>=-2048)
+						textArray[locCtr]|=4096+offset-3
+					end
+					textArray[locCtr]|=1<<OffsetTable[:I]
+					textArray[locCtr]|=1<<OffsetTable[:N]
+					textArray[locCtr]|=1<<OffsetTable[:P]
+					if(currentSection[:BaseCtr]&&symbolTable[target].class==Fixnum)
+						#B relative
+					else
+					
+					end
+				end
+				
 			end
 			currentSection[:TextArray][currentSection[:LocCtr]]=
 				"%0#{pack[:Format]*2}X"%currentSection[:TextArray][currentSection[:LocCtr]]
@@ -285,9 +330,15 @@ initProcs=->(){
 		ProcMnemonicChangeFormat.call(pack)
 		#generate binary code
 		if(ArgNum[pack[:Operator]]==0)
-			#no operand , direct output binary
 			currentSection[:TextArray][currentSection[:LocCtr]]=
-				MnemonicList[pack[:Operator]]
+				MnemonicList[pack[:Operator]]<<((pack[:Format]-1)*8)
+			#no operand , direct output binary
+			if(pack[:Operator]==:RSUB)
+				currentSection[:TextArray][currentSection[:LocCtr]]|=1<<OffsetTable[:N]
+				currentSection[:TextArray][currentSection[:LocCtr]]|=1<<OffsetTable[:I]
+			end
+			currentSection[:TextArray][currentSection[:LocCtr]]=
+				"%0#{pack[:Format]*2}X"%currentSection[:TextArray][currentSection[:LocCtr]]
 		elsif(ArgNum[pack[:Operator]]==2)
 			#with 2 register operands
 			currentSection[:TextArray][currentSection[:LocCtr]]=
@@ -302,6 +353,8 @@ initProcs=->(){
 			end
 			currentSection[:TextArray][currentSection[:LocCtr]]+=
 				RegTable[pack[:Operand][0].to_sym]<<4
+			currentSection[:TextArray][currentSection[:LocCtr]]=
+				"%0#{pack[:Format]*2}X"%currentSection[:TextArray][currentSection[:LocCtr]]
 		else
 			#normal case with 1 operand
 			#detect special type operator
@@ -353,6 +406,12 @@ initProcs=->(){
 			else
 				ErrorAction.call(pack[:Line],-9)
 			end
+		when :BASE
+			#set BASE counter
+			currentSection[:BaseCtr]=pack[:Operand][0] and 0
+		when :NOBASE
+			#clear BASE counter
+			currentSection[:BaseCtr]=nil or 0
 		else 0
 		end
 		currentSection[:LocCtr]+=length
@@ -389,15 +448,76 @@ initProcs=->(){
 				ErrorAction.call(pack[:Line],-6)
 			end
 			if(pack[:Label])
-				if(table=currentSection[:SymbolTable][pack[:Label]])
+				if(table=currentSection[:SymbolTable][pack[:Label]])					
+					currentSection[:SymbolTable][pack[:Label]]=currentSection[:LocCtr]
+					symbolTable=currentSection[:SymbolTable]
+					textArray=currentSection[:TextArray]
 					for location,data in table
 						xRegUsed=data[:XRegUsed]
-						target=data[:Operand][0]
-						#currentSection[:TextArray][location]
-						#p location
+						target=data[:Operand]
+						#backward reference
+						if(data[:Format]==4)
+							#Format 4 use immediate addressing
+							textArray[location]>>=8	
+							#immediate tag
+							textArray[location]|=1<<OffsetTable[:I]
+							#extend tag
+							textArray[location]|=1<<OffsetTable[:E]
+							if(data[:Mode]!=:IMMEDIATE)
+								textArray[location]|=1<<OffsetTable[:N]
+							end
+							textArray[location]<<=8
+							if(target.class==Fixnum)
+								textArray[location]|=target
+							else
+								textArray[location]|=currentSection[:SymbolTable][target]
+							end
+						else
+							#x register tag
+							if(data[:XRegUsed])
+								textArray[location]|=1<<OffsetTable[:X]
+							end
+							case data[:Mode]
+							when :IMMEDIATE
+								textArray[location]|=1<<OffsetTable[:I]
+								if(target.class==Fixnum)
+									textArray[location]|=target
+								else
+									textArray[location]|=symbolTable[target]
+								end
+							when :INDIRECT
+								textArray[location]|=1<<OffsetTable[:N]
+								if(target.class==Fixnum)
+									textArray[location]|=target
+								else
+									textArray[location]|=symbolTable[target]
+								end
+							else
+								#detect PC relative
+								offset=symbolTable[target]-location
+								if(offset>=0&&offset<=2050)
+									textArray[location]|=offset-3
+								elsif(offset<0&&offset>=-2048)
+									textArray[location]|=4096+offset-3
+								end
+								textArray[location]|=1<<OffsetTable[:I]
+								textArray[location]|=1<<OffsetTable[:N]
+								textArray[location]|=1<<OffsetTable[:P]
+								if(currentSection[:BaseCtr]&&symbolTable[target].class==Fixnum)
+									#B relative
+								else
+								
+								end
+							end
+							
+						end
+						if(data[:Format]==4)
+							currentSection[:TextArray][location]<<8
+						end
+						currentSection[:TextArray][location]=
+							"%0#{data[:Format]*2}X"%currentSection[:TextArray][location]
 						#TODO
 					end
-					currentSection[:SymbolTable][pack[:Label]]=currentSection[:LocCtr]
 				else
 					currentSection[:SymbolTable][pack[:Label]]=currentSection[:LocCtr]
 				end
@@ -472,6 +592,7 @@ init=->(){
     initRegisterTable.call()
     initProcs.call()
     initLineConvTable.call()
+	initOffsetTable.call()
 }
 main=->(){
     fileLineCount=1
