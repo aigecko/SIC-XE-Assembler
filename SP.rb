@@ -10,7 +10,7 @@ initMnemonicList=->(){
         LDT:     0x74,        LDX:     0x04,        LPS:      0xD0,        MULF:    0x60,
         MULR:    0x98,        NORM:    0xC8,        OR:       0x44,        RD:      0xD8,
         RMO:     0xAC,        RSUB:    0x4C,        SHIFTL:   0xA4,        SHIFTR:  0xA8,
-        SIO:     0xF0,        SSK:     0xEC,        STA:      0x00,        STB:     0x78,
+        SIO:     0xF0,        SSK:     0xEC,        STA:      0x0C,        STB:     0x78,
         STCH:    0x54,        STF:     0x80,        STI:      0xD4,        STL:     0x14,
         STS:     0x7C,        STSW:    0xE8,        STT:      0x84,        STX:     0x10,
         SUB:     0x1C,        SUBF:    0x5C,        SUBR:     0x94,        SVC:     0xB0,
@@ -144,7 +144,7 @@ initProcs=->(){
             "Runtime Error"
         end
         )
-		for sym,val in currentSection[:SymbolTable]
+		for sym,val in currentSection[:SymbolTable]		
 			puts "%s: %X"%[sym,val]
 		end
         STDERR.puts(
@@ -158,7 +158,9 @@ initProcs=->(){
     }
     ExitAction=->(){ exit(0) }
     FinalOutput=->(pack){
-		for sym,val in currentSection[:SymbolTable]
+		require 'pp'
+		pp currentSection[:SymbolTable]
+		for sym,val in currentSection[:SymbolTable].sort_by{|s,v| v}
 			puts "%s: %X"%[sym,val]
 		end
 		for name,section in Sections
@@ -215,13 +217,17 @@ initProcs=->(){
 			pack[:Format]=FormatTable[pack[:Operator].to_sym]
 		end
 		#change to inter format
-		pack[:Operator]=pack[:Operator].to_sym
+		if(pack[:Format]==4)
+			pack[:Operator]=pack[:Operator][1..-1].to_sym
+		else
+			pack[:Operator]=pack[:Operator].to_sym
+		end
 		#generate binary code
-		if(pack[:Operand].size==0)
+		if(ArgNum[pack[:Operator]]==0)
 			#no operand , direct output binary
 			currentSection[:TextArray][currentSection[:LocCtr]]=
 				MnemonicList[pack[:Operator]]
-		elsif(pack[:Operand].size==2)
+		elsif(ArgNum[pack[:Operator]]==2)
 			#with 2 register operands
 			currentSection[:TextArray][currentSection[:LocCtr]]=
 				MnemonicList[pack[:Operator]]<<((pack[:Format]-1)*8)
@@ -249,6 +255,33 @@ initProcs=->(){
 					pack[:Operand][0].to_i
 				end
 			else
+				currentSection[:TextArray][currentSection[:LocCtr]]=
+					MnemonicList[pack[:Operator]]<<((pack[:Format]-1)*8)					
+				target=pack[:Operand][0]
+				pack[:Mode]=(
+				case target[0]
+				when '@'
+					target=target[1..-1]
+					:INDIRECT
+				when '#' 
+					target=target[1..-1]
+					:IMMEDIATE
+				when '=' 
+					target=target[1..-1]
+					:LITERRAL
+				else :NORMAL
+				end)
+				if(!currentSection[:SymbolTable].keys.include?(target))
+					#forward reference first appear
+					currentSection[:SymbolTable][target]=[]
+					currentSection[:SymbolTable][target]<<[currentSection[:LocCtr],pack]
+				elsif(currentSection[:SymbolTable][target].class!=Fixnum)
+					#forward reference
+					currentSection[:SymbolTable][target]<<[currentSection[:LocCtr],pack]
+				else
+					#backward reference
+					#TODO				
+				end
 				#TODO
 			end
 		end
@@ -317,11 +350,24 @@ initProcs=->(){
 			Line[pack[:Line]]=result[:Line]
 			pack[:Label]=result[:Label]
 			#if label appear twice
-			if(currentSection[:SymbolTable].keys.include? pack[:Label])
+			if(currentSection[:SymbolTable].keys.include? pack[:Label]&&
+			   currentSection[:SymbolTable][pack[:Label]].class!=Fixnum)
 				ErrorAction.call(pack[:Line],-6)
 			end
 			if(pack[:Label])
-				currentSection[:SymbolTable][pack[:Label]]=currentSection[:LocCtr]
+				if(table=currentSection[:SymbolTable][pack[:Label]])
+					for location,data in table
+						xRegUsed=data[:XRegUsed]
+						target=data[:Operand][0]
+						#currentSection[:TextArray][location]
+						#p location
+						#TODO
+					end
+					currentSection[:SymbolTable][pack[:Label]]=currentSection[:LocCtr]
+				else
+					currentSection[:SymbolTable][pack[:Label]]=currentSection[:LocCtr]
+				end
+				
 			end
 			#detect whether 'X' appear
 			if(result[:Operand])
