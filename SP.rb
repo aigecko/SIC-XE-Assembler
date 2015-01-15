@@ -204,8 +204,7 @@ initProcs=->(){
 		SetLastLine.call(pack)
 		return FinalOutput.call(pack)
 	}
-
-    ProcMnemonic=->(pack){
+	ProcMnemonicChangeFormat=->(pack){
 		#detect format4
 		if(pack[:Operator][0]=='+')
 			#find mnemonic
@@ -222,6 +221,68 @@ initProcs=->(){
 		else
 			pack[:Operator]=pack[:Operator].to_sym
 		end
+	}
+	ProcMergeSymbol=->(pack){
+		target=pack[:Operand]
+		symbolTable=currentSection[:SymbolTable]
+		textArray=currentSection[:TextArray]
+		locCtr=currentSection[:LocCtr]
+		if(!symbolTable.keys.include?(target))
+			#forward reference first appear
+			symbolTable[target]=[]
+			symbolTable[target]<<[locCtr,pack]
+		elsif(symbolTable[target].class!=Fixnum)
+			#forward reference
+			symbolTable[target]<<[locCtr,pack]
+		else
+			#backward reference
+			if(pack[:Format]==4)
+				#Format 4 use immediate addressing
+				textArray[locCtr]>>8
+				textArray[locCtr]|=currentSection[:SymbolTable[target]]
+				#immediate tag
+				textArray[locCtr]|=1<<20
+				textArray[locCtr]<<8
+			else
+				#x register tag
+				if(pack[:XRegUsed])
+					textArray[locCtr]|=1<<19
+				end
+				case pack[:Mode]
+				when :IMMEDIATE
+					textArray[locCtr]|=1<<20
+				when :INDIRECT				
+					textArray[locCtr]|=1<<21
+				end								
+				offset=currentSection[:SymbolTable][target]-currentSection[:LocCtr]				
+			end
+			currentSection[:TextArray][currentSection[:LocCtr]]=
+				"%0#{pack[:Format]*2}X"%currentSection[:TextArray][currentSection[:LocCtr]]
+			#TODO
+		end
+	}
+	ProcMnemonicNormalCase=->(pack){
+		currentSection[:TextArray][currentSection[:LocCtr]]=
+			MnemonicList[pack[:Operator]]<<((pack[:Format]-1)*8)					
+		target=pack[:Operand][0]
+		pack[:Mode]=(
+		case target[0]
+		when '@'
+			target=target[1..-1]
+			:INDIRECT
+		when '#' 
+			target=target[1..-1]
+			:IMMEDIATE
+		when '=' 
+			target=target[1..-1]
+			:LITERRAL
+		else :NORMAL
+		end)
+		pack[:Operand]=target
+		ProcMergeSymbol.call(pack)
+	}
+    ProcMnemonic=->(pack){
+		ProcMnemonicChangeFormat.call(pack)
 		#generate binary code
 		if(ArgNum[pack[:Operator]]==0)
 			#no operand , direct output binary
@@ -255,34 +316,7 @@ initProcs=->(){
 					pack[:Operand][0].to_i
 				end
 			else
-				currentSection[:TextArray][currentSection[:LocCtr]]=
-					MnemonicList[pack[:Operator]]<<((pack[:Format]-1)*8)					
-				target=pack[:Operand][0]
-				pack[:Mode]=(
-				case target[0]
-				when '@'
-					target=target[1..-1]
-					:INDIRECT
-				when '#' 
-					target=target[1..-1]
-					:IMMEDIATE
-				when '=' 
-					target=target[1..-1]
-					:LITERRAL
-				else :NORMAL
-				end)
-				if(!currentSection[:SymbolTable].keys.include?(target))
-					#forward reference first appear
-					currentSection[:SymbolTable][target]=[]
-					currentSection[:SymbolTable][target]<<[currentSection[:LocCtr],pack]
-				elsif(currentSection[:SymbolTable][target].class!=Fixnum)
-					#forward reference
-					currentSection[:SymbolTable][target]<<[currentSection[:LocCtr],pack]
-				else
-					#backward reference
-					#TODO				
-				end
-				#TODO
+				ProcMnemonicNormalCase.call(pack)
 			end
 		end
 		currentSection[:LocCtr]+=pack[:Format]
