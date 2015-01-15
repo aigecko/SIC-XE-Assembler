@@ -108,8 +108,10 @@ CreateSection=->(pack){
 		TextRecord: String.new(),
 		TextArray: Hash.new(),
 		EndRecord: String.new(),
+		ModRecord: String.new(),
 
-		SymbolTable: Hash.new()
+		SymbolTable: Hash.new(),
+		AddressingQueue: Hash.new()
 	}
 }
 
@@ -148,10 +150,7 @@ initProcs=->(){
         else
             "Runtime Error"
         end
-        )
-		# for sym,val in currentSection[:SymbolTable]		
-			# puts "%s: %X"%[sym,val]
-		# end
+        )		
         STDERR.puts(
 		if(Line[fileLineCount]&&Line[fileLineCount]!="")
 			"At line code-mode: #{Line[fileLineCount]}"
@@ -163,23 +162,22 @@ initProcs=->(){
     }
     ExitAction=->(){ exit(0) }
     FinalOutput=->(pack){
-		require 'pp'
-		pp currentSection[:SymbolTable]
 		for sym,val in currentSection[:SymbolTable].sort_by{|s,v| v}
-			puts "%s: 0x%04X"%[sym,val]
+			STDERR.puts "%s: 0x%04X"%[sym,val]
 		end
 		
 		for name,section in Sections
 			puts section[:HeaderRecord]
 			for loc,code in section[:TextArray]
 				print 'T'
-				print "%06X %02X "%[loc,code.to_s.size/2]
+				print "%06X%02X"%[loc,code.to_s.size/2]
 				if(code.class==String)
 					puts code
 				else
 					puts "%X"%code
 				end
 			end
+			print section[:ModRecord]
 			puts section[:EndRecord]
 		end
 		ExitAction.call
@@ -261,6 +259,7 @@ initProcs=->(){
 					textArray[locCtr]|=target
 				else
 					textArray[locCtr]|=currentSection[:SymbolTable[target]]
+					currentSection[:ModRecord]<<("M%06X05\n"%(locCtr+1))
 				end
 			else
 				#x register tag
@@ -285,21 +284,26 @@ initProcs=->(){
 				else
 					#detect PC relative				
 					offset=symbolTable[target]-currentSection[:LocCtr]
-					if(offset>=0&&offset<=2050)
-						textArray[locCtr]|=offset-3
-					elsif(offset<0&&offset>=-2048)
-						textArray[locCtr]|=4096+offset-3
-					end
 					textArray[locCtr]|=1<<OffsetTable[:I]
 					textArray[locCtr]|=1<<OffsetTable[:N]
-					textArray[locCtr]|=1<<OffsetTable[:P]
-					if(currentSection[:BaseCtr]&&symbolTable[target].class==Fixnum)
-						#B relative
-					else
-					
-					end
-				end
-				
+					if(offset>=0&&offset<=2050)
+						textArray[locCtr]|=offset-3						
+						textArray[locCtr]|=1<<OffsetTable[:P]
+					elsif(offset<0&&offset>=-2048)
+						textArray[locCtr]|=4096+offset-3
+						textArray[locCtr]|=1<<OffsetTable[:P]						
+					elsif(offset<4095)
+						if(currentSection[:BaseCtr]&&
+							symbolTable[currentSection[:BaseCtr]].class==Fixnum&&
+							symbolTable[target].class==Fixnum)
+							#B relative
+							textArray[locCtr]|=1<<OffsetTable[:B]
+							textArray[locCtr]|=symbolTable[target]-symbolTable[currentSection[:BaseCtr]]
+						else
+							#B forward reference
+						end
+					end					
+				end				
 			end
 			currentSection[:TextArray][currentSection[:LocCtr]]=
 				"%0#{pack[:Format]*2}X"%currentSection[:TextArray][currentSection[:LocCtr]]
@@ -471,6 +475,7 @@ initProcs=->(){
 								textArray[location]|=target
 							else
 								textArray[location]|=currentSection[:SymbolTable][target]
+								currentSection[:ModRecord]<<("M%06X05\n"%(location+1))
 							end
 						else
 							#x register tag
@@ -495,21 +500,26 @@ initProcs=->(){
 							else
 								#detect PC relative
 								offset=symbolTable[target]-location
-								if(offset>=0&&offset<=2050)
-									textArray[location]|=offset-3
-								elsif(offset<0&&offset>=-2048)
-									textArray[location]|=4096+offset-3
-								end
 								textArray[location]|=1<<OffsetTable[:I]
 								textArray[location]|=1<<OffsetTable[:N]
-								textArray[location]|=1<<OffsetTable[:P]
-								if(currentSection[:BaseCtr]&&symbolTable[target].class==Fixnum)
-									#B relative
-								else
-								
+								if(offset>=0&&offset<=2050)
+									textArray[location]|=offset-3
+									textArray[location]|=1<<OffsetTable[:P]
+								elsif(offset<0&&offset>=-2048)
+									textArray[location]|=4096+offset-3
+									textArray[location]|=1<<OffsetTable[:P]
+								elsif(offset<4095)
+									if(currentSection[:BaseCtr]&&
+									   symbolTable[currentSection[:BaseCtr]].class==Fixnum&&
+									   symbolTable[target].class==Fixnum)
+										#B relative
+										textArray[location]|=1<<OffsetTable[:B]
+										textArray[location]|=symbolTable[target]-symbolTable[currentSection[:BaseCtr]]
+									else								
+										#B forward reference
+									end
 								end
-							end
-							
+							end							
 						end
 						if(data[:Format]==4)
 							currentSection[:TextArray][location]<<8
